@@ -22,6 +22,8 @@ final class BLETransport: NSObject, Sendable {
     private static let maxMessageSize = 1024
     private static let rxTimeout: TimeInterval = 1.0
 
+    // All mutable BLE state is confined to this serial queue. CoreBluetooth
+    // delegate callbacks are also delivered on this queue via CBCentralManager.
     private let queue = DispatchQueue(label: "TeslaBLE.BLETransport", qos: .userInitiated)
     private let logger: (any TeslaBLELogger)?
     private nonisolated(unsafe) var centralManager: CBCentralManager!
@@ -153,6 +155,10 @@ final class BLETransport: NSObject, Sendable {
         onStateChange?(newState)
     }
 
+    private func assertOnTransportQueue() {
+        dispatchPrecondition(condition: .onQueue(queue))
+    }
+
     private func tryFlush() -> Data? {
         guard inputBuffer.count >= 2 else { return nil }
         if let (message, consumed) = try? MessageFramer.decode(inputBuffer), let message {
@@ -167,17 +173,16 @@ final class BLETransport: NSObject, Sendable {
 
 extension BLETransport: CBCentralManagerDelegate {
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        queue.async { [self] in
-            logger?.log(.debug, category: "transport", "Central manager state changed: \(central.state.rawValue)")
-            if central.state == .poweredOn {
-                // If we're waiting to connect, start scanning now
-                if connectionContinuation != nil, state != .connecting, state != .connected {
-                    startScanning()
-                }
-            } else {
-                connectionContinuation?.resume(throwing: BLEError.bluetoothUnavailable)
-                connectionContinuation = nil
+        assertOnTransportQueue()
+        logger?.log(.debug, category: "transport", "Central manager state changed: \(central.state.rawValue)")
+        if central.state == .poweredOn {
+            // If we're waiting to connect, start scanning now
+            if connectionContinuation != nil, state != .connecting, state != .connected {
+                startScanning()
             }
+        } else {
+            connectionContinuation?.resume(throwing: BLEError.bluetoothUnavailable)
+            connectionContinuation = nil
         }
     }
 
@@ -188,23 +193,21 @@ extension BLETransport: CBCentralManagerDelegate {
         rssi RSSI: NSNumber,
     ) {
         let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
-        queue.async { [self] in
-            logger?.log(.debug, category: "transport", "Discovered: name=\(localName ?? "nil") peripheral=\(peripheral.name ?? "unnamed") rssi=\(RSSI) target=\(targetLocalName ?? "nil")")
-            guard localName == targetLocalName else { return }
-            logger?.log(.debug, category: "transport", "Found target vehicle! Connecting...")
-            central.stopScan()
-            self.peripheral = peripheral
-            peripheral.delegate = self
-            updateState(.connecting)
-            central.connect(peripheral, options: nil)
-        }
+        assertOnTransportQueue()
+        logger?.log(.debug, category: "transport", "Discovered: name=\(localName ?? "nil") peripheral=\(peripheral.name ?? "unnamed") rssi=\(RSSI) target=\(targetLocalName ?? "nil")")
+        guard localName == targetLocalName else { return }
+        logger?.log(.debug, category: "transport", "Found target vehicle! Connecting...")
+        central.stopScan()
+        self.peripheral = peripheral
+        peripheral.delegate = self
+        updateState(.connecting)
+        central.connect(peripheral, options: nil)
     }
 
     nonisolated func centralManager(_: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        queue.async { [self] in
-            logger?.log(.debug, category: "transport", "Connected to peripheral, discovering services...")
-            peripheral.discoverServices([Self.vehicleServiceUUID])
-        }
+        assertOnTransportQueue()
+        logger?.log(.debug, category: "transport", "Connected to peripheral, discovering services...")
+        peripheral.discoverServices([Self.vehicleServiceUUID])
     }
 
     nonisolated func centralManager(
@@ -212,11 +215,10 @@ extension BLETransport: CBCentralManagerDelegate {
         didFailToConnect _: CBPeripheral,
         error: Error?,
     ) {
-        queue.async { [self] in
-            connectionContinuation?.resume(throwing: error ?? BLEError.connectionFailed)
-            connectionContinuation = nil
-            cleanup()
-        }
+        assertOnTransportQueue()
+        connectionContinuation?.resume(throwing: error ?? BLEError.connectionFailed)
+        connectionContinuation = nil
+        cleanup()
     }
 
     nonisolated func centralManager(
@@ -224,14 +226,13 @@ extension BLETransport: CBCentralManagerDelegate {
         didDisconnectPeripheral _: CBPeripheral,
         error _: Error?,
     ) {
-        queue.async { [self] in
-            cleanup()
-            // Fail any pending receives
-            for cont in receiveContinuations {
-                cont.resume(throwing: BLEError.disconnected)
-            }
-            receiveContinuations.removeAll()
+        assertOnTransportQueue()
+        cleanup()
+        // Fail any pending receives
+        for cont in receiveContinuations {
+            cont.resume(throwing: BLEError.disconnected)
         }
+        receiveContinuations.removeAll()
     }
 }
 
@@ -239,17 +240,16 @@ extension BLETransport: CBCentralManagerDelegate {
 
 extension BLETransport: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices _: Error?) {
-        queue.async { [self] in
-            guard let service = peripheral.services?.first(where: { $0.uuid == Self.vehicleServiceUUID }) else {
-                connectionContinuation?.resume(throwing: BLEError.serviceNotFound)
-                connectionContinuation = nil
-                return
-            }
-            peripheral.discoverCharacteristics(
-                [Self.toVehicleUUID, Self.fromVehicleUUID],
-                for: service,
-            )
+        assertOnTransportQueue()
+        guard let service = peripheral.services?.first(where: { $0.uuid == Self.vehicleServiceUUID }) else {
+            connectionContinuation?.resume(throwing: BLEError.serviceNotFound)
+            connectionContinuation = nil
+            return
         }
+        peripheral.discoverCharacteristics(
+            [Self.toVehicleUUID, Self.fromVehicleUUID],
+            for: service,
+        )
     }
 
     nonisolated func peripheral(
@@ -257,34 +257,33 @@ extension BLETransport: CBPeripheralDelegate {
         didDiscoverCharacteristicsFor service: CBService,
         error _: Error?,
     ) {
-        queue.async { [self] in
-            guard let characteristics = service.characteristics else {
-                connectionContinuation?.resume(throwing: BLEError.characteristicsNotFound)
-                connectionContinuation = nil
-                return
-            }
-            for char in characteristics {
-                if char.uuid == Self.toVehicleUUID {
-                    txCharacteristic = char
-                } else if char.uuid == Self.fromVehicleUUID {
-                    rxCharacteristic = char
-                    peripheral.setNotifyValue(true, for: char)
-                }
-            }
-            // Use writeWithResponse if the characteristic doesn't support writeWithoutResponse.
-            // Tesla vehicles typically advertise property 0x8 (write with response only).
-            if let tx = txCharacteristic, tx.properties.contains(.writeWithoutResponse) {
-                writeType = .withoutResponse
-                mtu = peripheral.maximumWriteValueLength(for: .withoutResponse)
-            } else {
-                writeType = .withResponse
-                mtu = peripheral.maximumWriteValueLength(for: .withResponse)
-            }
-            logger?.log(.debug, category: "transport", "Characteristics discovered. TX=\(txCharacteristic != nil) RX=\(rxCharacteristic != nil) MTU=\(mtu) writeType=\(writeType == .withResponse ? "withResponse" : "withoutResponse") txProperties=\(txCharacteristic?.properties.rawValue ?? 0)")
-            updateState(.connected)
-            connectionContinuation?.resume()
+        assertOnTransportQueue()
+        guard let characteristics = service.characteristics else {
+            connectionContinuation?.resume(throwing: BLEError.characteristicsNotFound)
             connectionContinuation = nil
+            return
         }
+        for char in characteristics {
+            if char.uuid == Self.toVehicleUUID {
+                txCharacteristic = char
+            } else if char.uuid == Self.fromVehicleUUID {
+                rxCharacteristic = char
+                peripheral.setNotifyValue(true, for: char)
+            }
+        }
+        // Use writeWithResponse if the characteristic doesn't support writeWithoutResponse.
+        // Tesla vehicles typically advertise property 0x8 (write with response only).
+        if let tx = txCharacteristic, tx.properties.contains(.writeWithoutResponse) {
+            writeType = .withoutResponse
+            mtu = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        } else {
+            writeType = .withResponse
+            mtu = peripheral.maximumWriteValueLength(for: .withResponse)
+        }
+        logger?.log(.debug, category: "transport", "Characteristics discovered. TX=\(txCharacteristic != nil) RX=\(rxCharacteristic != nil) MTU=\(mtu) writeType=\(writeType == .withResponse ? "withResponse" : "withoutResponse") txProperties=\(txCharacteristic?.properties.rawValue ?? 0)")
+        updateState(.connected)
+        connectionContinuation?.resume()
+        connectionContinuation = nil
     }
 
     nonisolated func peripheral(
@@ -292,24 +291,23 @@ extension BLETransport: CBPeripheralDelegate {
         didUpdateValueFor characteristic: CBCharacteristic,
         error _: Error?,
     ) {
-        queue.async { [self] in
-            guard characteristic.uuid == Self.fromVehicleUUID,
-                  let value = characteristic.value else { return }
+        assertOnTransportQueue()
+        guard characteristic.uuid == Self.fromVehicleUUID,
+              let value = characteristic.value else { return }
 
-            let now = Date()
-            if let lastRx = lastRxTime, now.timeIntervalSince(lastRx) > Self.rxTimeout {
-                inputBuffer = Data()
-            }
-            lastRxTime = now
-            inputBuffer.append(value)
+        let now = Date()
+        if let lastRx = lastRxTime, now.timeIntervalSince(lastRx) > Self.rxTimeout {
+            inputBuffer = Data()
+        }
+        lastRxTime = now
+        inputBuffer.append(value)
 
-            // Deliver complete messages to waiting receivers.
-            // Only extract when someone is waiting — otherwise leave in inputBuffer
-            // so the next receive() call picks it up via tryFlush().
-            while !receiveContinuations.isEmpty, let message = tryFlush() {
-                let continuation = receiveContinuations.removeFirst()
-                continuation.resume(returning: message)
-            }
+        // Deliver complete messages to waiting receivers.
+        // Only extract when someone is waiting — otherwise leave in inputBuffer
+        // so the next receive() call picks it up via tryFlush().
+        while !receiveContinuations.isEmpty, let message = tryFlush() {
+            let continuation = receiveContinuations.removeFirst()
+            continuation.resume(returning: message)
         }
     }
 }
