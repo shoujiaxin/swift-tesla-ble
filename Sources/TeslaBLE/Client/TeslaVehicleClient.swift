@@ -180,7 +180,10 @@ public actor TeslaVehicleClient {
     /// session for their domain; ``TeslaBLEError/notConnected`` is thrown
     /// otherwise. The one exception is ``Command/Security/addKey(publicKey:role:formFactor:)``,
     /// which uses the unsigned VCSEC pairing path and must be issued after
-    /// connecting with ``ConnectMode/pairing``.
+    /// connecting with ``ConnectMode/pairing``. That pairing request returns
+    /// once the request is transmitted over BLE; the user still needs to tap
+    /// an existing owner key on the center console, then reconnect in normal
+    /// mode to verify the newly-added key is active.
     ///
     /// - Parameters:
     ///   - command: The command to dispatch.
@@ -194,19 +197,17 @@ public actor TeslaVehicleClient {
         let (domain, body) = try CommandEncoder.encode(command)
 
         // Unsigned pairing path: addKey is issued before any session exists.
+        // Match Tesla's reference behavior and return once the request has
+        // been transmitted; the vehicle may complete authorization later.
         if case .security(.addKey) = command {
-            let pairingTimeout = timeout < .seconds(60) ? Duration.seconds(60) : timeout
-            let responseBytes: Data
             do {
-                responseBytes = try await dispatcher.sendUnsigned(
+                try await dispatcher.sendUnsignedNoReply(
                     body,
                     domain: domain,
-                    timeout: pairingTimeout,
                 )
             } catch {
-                throw Self.mapDispatcherError(error)
+                throw Self.mapAddKeyError(error)
             }
-            try decodeCommandResult(responseBytes: responseBytes, domain: domain)
             return
         }
 
@@ -453,5 +454,27 @@ public actor TeslaVehicleClient {
             return t
         }
         return .fetchFailed(underlying: (error as NSError).localizedDescription)
+    }
+
+    private static func mapAddKeyError(_ error: Error) -> TeslaBLEError {
+        if let bleError = error as? BLEError {
+            return mapTransportError(bleError)
+        }
+        if let dispatcherError = error as? Dispatcher.Error {
+            switch dispatcherError {
+            case .notStarted, .notConnected, .alreadyStarted, .noSessionForDomain, .shutdown:
+                return .notConnected
+            case .timeout:
+                return .addKeyFailed(underlying: "timed out sending addKey request")
+            case let .encodingFailed(message),
+                 let .decodingFailed(message),
+                 let .unexpectedResponse(message):
+                return .addKeyFailed(underlying: message)
+            }
+        }
+        if let teslaError = error as? TeslaBLEError {
+            return teslaError
+        }
+        return .addKeyFailed(underlying: (error as NSError).localizedDescription)
     }
 }

@@ -63,14 +63,16 @@ let publicKey = KeyPairFactory.publicKeyBytes(of: privateKey)
 let client = TeslaVehicleClient(vin: vin, keyStore: keyStore)
 try await client.connect(mode: .pairing)
 
-// 3. Send the unsigned addKey request. The car waits for the user to tap an
-//    existing owner key (NFC card) on the center console to authorize.
+// 3. Send the unsigned addKey request. This returns once the request is on
+//    BLE; authorization still completes asynchronously after the user taps an
+//    existing owner key (NFC card) on the center console.
 try await client.send(.security(.addKey(
     publicKey: publicKey,
     role: .owner,
     formFactor: .iosDevice
 )))
 
+// 4. Disconnect, then reconnect in normal mode to verify the key is active.
 await client.disconnect()
 ```
 
@@ -163,7 +165,7 @@ Key invariants:
 swift test
 ```
 
-141 tests covering the crypto primitives (with fixture vectors dumped from Tesla's Go reference), session sign/verify round-trips, dispatcher scenarios, every command encoder and query decoder, and the snapshot mapper. All deterministic — no real BLE or hardware required.
+178 tests covering the crypto primitives (with fixture vectors dumped from Tesla's Go reference), session sign/verify round-trips, dispatcher scenarios, every command encoder and query decoder, and the snapshot mapper. All deterministic — no real BLE or hardware required.
 
 ```bash
 make format   # swiftformat + prettier (Vendor/ and Generated/ excluded)

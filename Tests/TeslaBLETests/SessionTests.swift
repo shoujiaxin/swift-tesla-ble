@@ -346,6 +346,7 @@ final class SessionTests: XCTestCase {
             publicKey: publicKey,
             challenge: challenge,
             uuid: Data([0xDE, 0xAD]),
+            fromRoutingAddress: Data(repeating: 0x11, count: 16),
         )
         XCTAssertEqual(message.toDestination.domain, .vehicleSecurity)
         XCTAssertEqual(message.uuid, Data([0xDE, 0xAD]))

@@ -79,6 +79,9 @@ actor Dispatcher {
         var dst = UniversalMessage_Destination()
         dst.domain = domain
         request.toDestination = dst
+        var fromDst = UniversalMessage_Destination()
+        fromDst.routingAddress = Self.newRoutingAddress()
+        request.fromDestination = fromDst
         let requestUUID = Self.newUUIDBytes()
         request.uuid = requestUUID
 
@@ -127,6 +130,9 @@ actor Dispatcher {
         var dst = UniversalMessage_Destination()
         dst.domain = domain
         request.toDestination = dst
+        var fromDst = UniversalMessage_Destination()
+        fromDst.routingAddress = Self.newRoutingAddress()
+        request.fromDestination = fromDst
         let requestUUID = Self.newUUIDBytes()
         request.uuid = requestUUID
         request.payload = .protobufMessageAsBytes(plaintext)
@@ -152,6 +158,32 @@ actor Dispatcher {
         return payload
     }
 
+    /// One-way unsigned send used by the BLE pairing bootstrap.
+    ///
+    /// Unlike `sendUnsigned(_:domain:timeout:)`, this method only guarantees
+    /// that the request was serialized and handed to the transport. It does
+    /// not wait for a terminal VCSEC response because real vehicles may keep
+    /// the whitelist operation pending until the user authorizes on the center
+    /// console and may never emit a matching response for the original uuid.
+    func sendUnsignedNoReply(
+        _ plaintext: Data,
+        domain: UniversalMessage_Domain,
+    ) async throws {
+        guard started else { throw Error.notStarted }
+
+        var request = UniversalMessage_RoutableMessage()
+        var dst = UniversalMessage_Destination()
+        dst.domain = domain
+        request.toDestination = dst
+        var fromDst = UniversalMessage_Destination()
+        fromDst.routingAddress = Self.newRoutingAddress()
+        request.fromDestination = fromDst
+        request.uuid = Self.newUUIDBytes()
+        request.payload = .protobufMessageAsBytes(plaintext)
+
+        try await transmit(message: request)
+    }
+
     // MARK: - Handshake
 
     /// Runs a SessionInfoRequest/SessionInfo handshake and returns the decoded
@@ -170,7 +202,20 @@ actor Dispatcher {
         timeout: Duration = .seconds(10),
     ) async throws -> (sessionInfo: Signatures_SessionInfo, sessionKey: SessionKey) {
         guard started else { throw Error.notStarted }
+        return try await negotiateOnce(
+            domain: domain,
+            localPrivateKey: localPrivateKey,
+            verifierName: verifierName,
+            timeout: timeout,
+        )
+    }
 
+    private func negotiateOnce(
+        domain: UniversalMessage_Domain,
+        localPrivateKey: P256.KeyAgreement.PrivateKey,
+        verifierName: Data,
+        timeout: Duration,
+    ) async throws -> (sessionInfo: Signatures_SessionInfo, sessionKey: SessionKey) {
         // Challenge: 8 random bytes (matches Go test helper).
         var challenge = Data(count: 8)
         let challengeCount = challenge.count
@@ -186,6 +231,7 @@ actor Dispatcher {
             publicKey: localPublicKey,
             challenge: challenge,
             uuid: Self.newUUIDBytes(),
+            fromRoutingAddress: Self.newRoutingAddress(),
         )
 
         let response: UniversalMessage_RoutableMessage = try await withRegisteredRequest(
@@ -358,6 +404,20 @@ actor Dispatcher {
     private static func newUUIDBytes() -> Data {
         var uuid = UUID().uuid
         return withUnsafeBytes(of: &uuid) { Data($0) }
+    }
+
+    /// 16-byte random "from" address placed on every outbound
+    /// `RoutableMessage.fromDestination.routingAddress`. Vehicles use this to
+    /// route the reply back and fold it into the session-info HMAC metadata —
+    /// messages without one get answered with an unsigned SessionInfo broadcast
+    /// that can never complete a handshake.
+    static func newRoutingAddress() -> Data {
+        var bytes = Data(count: 16)
+        let count = bytes.count
+        bytes.withUnsafeMutableBytes { buf in
+            _ = SecRandomCopyBytes(kSecRandomDefault, count, buf.baseAddress!)
+        }
+        return bytes
     }
 
     /// Uses the `nanoseconds:` form of `Task.sleep` because `sleep(for:)`

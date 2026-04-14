@@ -232,6 +232,33 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherSendUnsignedNoReplyReturnsAfterTransmit() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+
+        let start = ContinuousClock.now
+        try await dispatcher.sendUnsignedNoReply(Data([0xAA, 0xBB, 0xCC]), domain: .vehicleSecurity)
+        let elapsed = ContinuousClock.now - start
+
+        XCTAssertLessThan(elapsed, .seconds(1), "one-way addKey bootstrap should not wait for a response")
+
+        let outbound = await transport.sentMessages
+        XCTAssertEqual(outbound.count, 1)
+
+        let message = try UniversalMessage_RoutableMessage(serializedBytes: outbound[0])
+        XCTAssertEqual(message.toDestination.domain, .vehicleSecurity)
+        XCTAssertFalse(message.uuid.isEmpty)
+        guard case let .protobufMessageAsBytes(payload)? = message.payload else {
+            XCTFail("expected protobuf payload")
+            return
+        }
+        XCTAssertEqual(payload, Data([0xAA, 0xBB, 0xCC]))
+
+        await dispatcher.stop()
+    }
+
     // MARK: - Dispatcher timeout
 
     @available(macOS 13.0, iOS 16.0, *)
@@ -399,6 +426,12 @@ final class DispatcherTests: XCTestCase {
             XCTFail("expected SessionInfoRequest payload"); return
         }
         XCTAssertEqual(req.challenge.count, 8, "challenge is 8 random bytes")
+        XCTAssertTrue(outboundRequest.hasFromDestination, "SessionInfoRequest must set fromDestination")
+        guard case let .routingAddress(addr)? = outboundRequest.fromDestination.subDestination else {
+            XCTFail("fromDestination must carry a routingAddress"); return
+        }
+        XCTAssertEqual(addr.count, 16, "routing address is 16 bytes")
+        XCTAssertNotEqual(addr, Data(count: 16), "routing address must be random, not all zeros")
 
         // Construct a SessionInfo response with the vehicle's real public key.
         var info = Signatures_SessionInfo()
@@ -431,6 +464,413 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(decodedInfo.counter, 7)
         XCTAssertEqual(decodedInfo.clockTime, 99)
         XCTAssertEqual(derivedKey, sessionKey, "dispatcher should derive the same session key")
+
+        await dispatcher.stop()
+    }
+
+    // MARK: - fromDestination.routingAddress
+
+    /// Vehicles fold `fromDestination.routingAddress` into the session-info
+    /// HMAC metadata. Without it they reply with an unsigned SessionInfo
+    /// broadcast that cannot complete a handshake (observed bug on real cars).
+    func testSessionNegotiatorBuildRequestSetsRoutingAddress() {
+        let publicKey = Data(repeating: 0x04, count: 65)
+        let challenge = Data(repeating: 0xAA, count: 8)
+        let routingAddress = Data((0 ..< 16).map { UInt8($0 + 1) })
+
+        let message = SessionNegotiator.buildRequest(
+            domain: .vehicleSecurity,
+            publicKey: publicKey,
+            challenge: challenge,
+            uuid: Data([0x01, 0x02]),
+            fromRoutingAddress: routingAddress,
+        )
+
+        XCTAssertTrue(message.hasFromDestination)
+        guard case let .routingAddress(addr)? = message.fromDestination.subDestination else {
+            XCTFail("fromDestination must carry a routingAddress"); return
+        }
+        XCTAssertEqual(addr, routingAddress)
+        XCTAssertEqual(message.toDestination.domain, .vehicleSecurity)
+    }
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherSendUnsignedNoReplySetsRoutingAddress() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+
+        try await dispatcher.sendUnsignedNoReply(
+            Data("pair".utf8),
+            domain: .vehicleSecurity,
+        )
+
+        // The request is fire-and-forget, but the outbound bytes should already
+        // be recorded by FakeTransport.
+        let outbound = await transport.sentMessages
+        XCTAssertEqual(outbound.count, 1)
+        let msg = try UniversalMessage_RoutableMessage(serializedBytes: outbound[0])
+        XCTAssertTrue(msg.hasFromDestination)
+        guard case let .routingAddress(addr)? = msg.fromDestination.subDestination else {
+            XCTFail("fromDestination must carry a routingAddress"); return
+        }
+        XCTAssertEqual(addr.count, 16)
+        XCTAssertNotEqual(addr, Data(count: 16))
+
+        await dispatcher.stop()
+    }
+
+    // MARK: - sendUnsigned (reply variant)
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherSendUnsignedRoundtrip() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+
+        let sendTask = Task { () throws -> Data in
+            try await dispatcher.sendUnsigned(
+                Data("vcsecInformationRequest".utf8),
+                domain: .vehicleSecurity,
+                timeout: .seconds(2),
+            )
+        }
+
+        // Wait for the outbound request and build a matching unsigned response.
+        var outbound: [Data] = []
+        for _ in 0 ..< 50 {
+            outbound = await transport.sentMessages
+            if !outbound.isEmpty { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(outbound.count, 1)
+        let request = try UniversalMessage_RoutableMessage(serializedBytes: outbound[0])
+        XCTAssertTrue(request.hasFromDestination)
+
+        var response = UniversalMessage_RoutableMessage()
+        response.requestUuid = request.uuid
+        response.payload = .protobufMessageAsBytes(Data("fromVCSEC".utf8))
+        try await transport.enqueueInbound(response.serializedData())
+
+        let payload = try await sendTask.value
+        XCTAssertEqual(payload, Data("fromVCSEC".utf8))
+
+        await dispatcher.stop()
+    }
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherSendUnsignedRejectsResponseWithoutPayload() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+
+        let sendTask = Task { () throws -> Data in
+            try await dispatcher.sendUnsigned(
+                Data("req".utf8),
+                domain: .vehicleSecurity,
+                timeout: .seconds(2),
+            )
+        }
+
+        var outbound: [Data] = []
+        for _ in 0 ..< 50 {
+            outbound = await transport.sentMessages
+            if !outbound.isEmpty { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(outbound.count, 1)
+        let request = try UniversalMessage_RoutableMessage(serializedBytes: outbound[0])
+
+        // Response without a protobufMessageAsBytes payload.
+        var response = UniversalMessage_RoutableMessage()
+        response.requestUuid = request.uuid
+        // No payload set.
+        try await transport.enqueueInbound(response.serializedData())
+
+        do {
+            _ = try await sendTask.value
+            XCTFail("expected decodingFailed")
+        } catch let Dispatcher.Error.decodingFailed(reason) {
+            XCTAssertTrue(reason.contains("unsigned response"), "got: \(reason)")
+        }
+
+        await dispatcher.stop()
+    }
+
+    // MARK: - Negotiate error paths
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherNegotiateRejectsResponseMissingSessionInfo() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+        let clientKey = P256.KeyAgreement.PrivateKey()
+
+        let task = Task { () throws -> (Signatures_SessionInfo, SessionKey) in
+            try await dispatcher.negotiate(
+                domain: .vehicleSecurity,
+                localPrivateKey: clientKey,
+                verifierName: Data("v".utf8),
+                timeout: .seconds(2),
+            )
+        }
+
+        let outboundBytes = try await waitForFirstOutbound(transport)
+        let request = try UniversalMessage_RoutableMessage(serializedBytes: outboundBytes)
+
+        var response = UniversalMessage_RoutableMessage()
+        response.requestUuid = request.uuid
+        // No payload → triggers missing sessionInfo branch.
+        try await transport.enqueueInbound(response.serializedData())
+
+        do {
+            _ = try await task.value
+            XCTFail("expected unexpectedResponse")
+        } catch let Dispatcher.Error.unexpectedResponse(reason) {
+            XCTAssertTrue(reason.contains("missing sessionInfo payload"), "got: \(reason)")
+        }
+        await dispatcher.stop()
+    }
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherNegotiateRejectsResponseMissingSignatureData() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+        let clientKey = P256.KeyAgreement.PrivateKey()
+
+        let task = Task { () throws -> (Signatures_SessionInfo, SessionKey) in
+            try await dispatcher.negotiate(
+                domain: .vehicleSecurity,
+                localPrivateKey: clientKey,
+                verifierName: Data("v".utf8),
+                timeout: .seconds(2),
+            )
+        }
+
+        let outboundBytes = try await waitForFirstOutbound(transport)
+        let request = try UniversalMessage_RoutableMessage(serializedBytes: outboundBytes)
+
+        var info = Signatures_SessionInfo()
+        info.publicKey = Data(repeating: 0x04, count: 65)
+        var response = UniversalMessage_RoutableMessage()
+        response.requestUuid = request.uuid
+        response.payload = try .sessionInfo(info.serializedData())
+        // No subSigData → triggers missing signature data branch.
+        try await transport.enqueueInbound(response.serializedData())
+
+        do {
+            _ = try await task.value
+            XCTFail("expected unexpectedResponse")
+        } catch let Dispatcher.Error.unexpectedResponse(reason) {
+            XCTAssertTrue(reason.contains("missing signature data"), "got: \(reason)")
+        }
+        await dispatcher.stop()
+    }
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherNegotiateRejectsWrongSignatureType() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+        let clientKey = P256.KeyAgreement.PrivateKey()
+
+        let task = Task { () throws -> (Signatures_SessionInfo, SessionKey) in
+            try await dispatcher.negotiate(
+                domain: .vehicleSecurity,
+                localPrivateKey: clientKey,
+                verifierName: Data("v".utf8),
+                timeout: .seconds(2),
+            )
+        }
+
+        let outboundBytes = try await waitForFirstOutbound(transport)
+        let request = try UniversalMessage_RoutableMessage(serializedBytes: outboundBytes)
+
+        var info = Signatures_SessionInfo()
+        info.publicKey = Data(repeating: 0x04, count: 65)
+        var response = UniversalMessage_RoutableMessage()
+        response.requestUuid = request.uuid
+        response.payload = try .sessionInfo(info.serializedData())
+
+        // Signature present but wrong type (hmacPersonalizedData instead of sessionInfoTag).
+        var hmac = Signatures_HMAC_Personalized_Signature_Data()
+        hmac.tag = Data(repeating: 0xAA, count: 16)
+        var sig = Signatures_SignatureData()
+        sig.sigType = .hmacPersonalizedData(hmac)
+        response.subSigData = .signatureData(sig)
+        try await transport.enqueueInbound(response.serializedData())
+
+        do {
+            _ = try await task.value
+            XCTFail("expected unexpectedResponse")
+        } catch let Dispatcher.Error.unexpectedResponse(reason) {
+            XCTAssertTrue(reason.contains("wrong signature type"), "got: \(reason)")
+        }
+        await dispatcher.stop()
+    }
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherNegotiateRejectsHMACTagMismatch() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+        let clientKey = P256.KeyAgreement.PrivateKey()
+        let vehicleKey = P256.KeyAgreement.PrivateKey()
+
+        let task = Task { () throws -> (Signatures_SessionInfo, SessionKey) in
+            try await dispatcher.negotiate(
+                domain: .vehicleSecurity,
+                localPrivateKey: clientKey,
+                verifierName: Data("v".utf8),
+                timeout: .seconds(2),
+            )
+        }
+
+        let outboundBytes = try await waitForFirstOutbound(transport)
+        let request = try UniversalMessage_RoutableMessage(serializedBytes: outboundBytes)
+
+        // Well-formed SessionInfo + a deliberately-wrong HMAC tag.
+        var info = Signatures_SessionInfo()
+        info.publicKey = vehicleKey.publicKey.x963Representation
+        info.epoch = Data(repeating: 0xAB, count: 16)
+        info.counter = 1
+
+        var response = UniversalMessage_RoutableMessage()
+        response.requestUuid = request.uuid
+        response.payload = try .sessionInfo(info.serializedData())
+
+        var tag = Signatures_HMAC_Signature_Data()
+        tag.tag = Data(repeating: 0xFF, count: 16) // wrong
+        var sig = Signatures_SignatureData()
+        sig.sigType = .sessionInfoTag(tag)
+        response.subSigData = .signatureData(sig)
+        try await transport.enqueueInbound(response.serializedData())
+
+        do {
+            _ = try await task.value
+            XCTFail("expected unexpectedResponse")
+        } catch let Dispatcher.Error.unexpectedResponse(reason) {
+            XCTAssertTrue(reason.contains("HMAC tag mismatch"), "got: \(reason)")
+        }
+        await dispatcher.stop()
+    }
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherNegotiateRejectsMalformedVehiclePublicKey() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+        let clientKey = P256.KeyAgreement.PrivateKey()
+
+        let task = Task { () throws -> (Signatures_SessionInfo, SessionKey) in
+            try await dispatcher.negotiate(
+                domain: .vehicleSecurity,
+                localPrivateKey: clientKey,
+                verifierName: Data("v".utf8),
+                timeout: .seconds(2),
+            )
+        }
+
+        let outboundBytes = try await waitForFirstOutbound(transport)
+        let request = try UniversalMessage_RoutableMessage(serializedBytes: outboundBytes)
+
+        // SessionInfo with a bogus vehicle public key (wrong length).
+        var info = Signatures_SessionInfo()
+        info.publicKey = Data(repeating: 0x00, count: 3) // not a P-256 point
+
+        var response = UniversalMessage_RoutableMessage()
+        response.requestUuid = request.uuid
+        response.payload = try .sessionInfo(info.serializedData())
+
+        var tag = Signatures_HMAC_Signature_Data()
+        tag.tag = Data(repeating: 0xAA, count: 16)
+        var sig = Signatures_SignatureData()
+        sig.sigType = .sessionInfoTag(tag)
+        response.subSigData = .signatureData(sig)
+        try await transport.enqueueInbound(response.serializedData())
+
+        do {
+            _ = try await task.value
+            XCTFail("expected decodingFailed")
+        } catch let Dispatcher.Error.decodingFailed(reason) {
+            XCTAssertTrue(reason.contains("ECDH"), "got: \(reason)")
+        }
+        await dispatcher.stop()
+    }
+
+    // MARK: - Session routing
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherRequireSessionRejectsUnsupportedDomain() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+
+        do {
+            _ = try await dispatcher.send(Data("x".utf8), domain: .broadcast)
+            XCTFail("expected noSessionForDomain")
+        } catch let Dispatcher.Error.noSessionForDomain(d) {
+            XCTAssertEqual(d, .broadcast)
+        }
+
+        await dispatcher.stop()
+    }
+
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherInstallsInfotainmentSessionIndependently() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+        let infotainment = makeSession(domain: .infotainment)
+        await dispatcher.installSession(infotainment, forDomain: .infotainment)
+
+        // VCSEC still has no session.
+        do {
+            _ = try await dispatcher.send(Data("lock".utf8), domain: .vehicleSecurity)
+            XCTFail("expected noSessionForDomain(vcsec)")
+        } catch Dispatcher.Error.noSessionForDomain(.vehicleSecurity) {
+            // ok
+        }
+
+        await dispatcher.stop()
+    }
+
+    // MARK: - Helpers (coverage tests)
+
+    @available(macOS 13.0, iOS 16.0, *)
+    private func waitForFirstOutbound(_ transport: FakeTransport) async throws -> Data {
+        for _ in 0 ..< 100 {
+            let sent = await transport.sentMessages
+            if let first = sent.first { return first }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("no outbound message")
+        throw Dispatcher.Error.timeout
+    }
+
+    /// Two successive sends must use independent random routing addresses —
+    /// matches the reference app's per-message randomization.
+    @available(macOS 13.0, iOS 16.0, *)
+    func testDispatcherRoutingAddressVariesPerMessage() async throws {
+        let transport = FakeTransport()
+        let dispatcher = Dispatcher(transport: transport)
+        try await dispatcher.start()
+
+        try await dispatcher.sendUnsignedNoReply(Data("a".utf8), domain: .vehicleSecurity)
+        try await dispatcher.sendUnsignedNoReply(Data("b".utf8), domain: .vehicleSecurity)
+
+        let outbound = await transport.sentMessages
+        XCTAssertEqual(outbound.count, 2)
+        let m0 = try UniversalMessage_RoutableMessage(serializedBytes: outbound[0])
+        let m1 = try UniversalMessage_RoutableMessage(serializedBytes: outbound[1])
+        guard
+            case let .routingAddress(a0)? = m0.fromDestination.subDestination,
+            case let .routingAddress(a1)? = m1.fromDestination.subDestination
+        else {
+            XCTFail("missing routingAddress"); return
+        }
+        XCTAssertNotEqual(a0, a1, "each outbound message should get a fresh routing address")
 
         await dispatcher.stop()
     }

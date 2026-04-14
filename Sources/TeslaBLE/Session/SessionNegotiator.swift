@@ -39,6 +39,7 @@ enum SessionNegotiator {
         publicKey: Data,
         challenge: Data,
         uuid: Data = Data(),
+        fromRoutingAddress: Data,
     ) -> UniversalMessage_RoutableMessage {
         var request = UniversalMessage_SessionInfoRequest()
         request.publicKey = publicKey
@@ -47,8 +48,15 @@ enum SessionNegotiator {
         var destination = UniversalMessage_Destination()
         destination.domain = domain
 
+        // Vehicles fold `fromDestination.routingAddress` into the session-info
+        // HMAC metadata. Omitting it causes the car to answer with an
+        // unsigned SessionInfo broadcast that can never complete a handshake.
+        var fromDestination = UniversalMessage_Destination()
+        fromDestination.routingAddress = fromRoutingAddress
+
         var message = UniversalMessage_RoutableMessage()
         message.toDestination = destination
+        message.fromDestination = fromDestination
         message.uuid = uuid
         message.payload = .sessionInfoRequest(request)
         return message
