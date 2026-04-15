@@ -14,7 +14,6 @@ actor VehicleSession {
         case counterRollover
         case signFailed(String)
         case verifyFailed(String)
-        case replayRejected
     }
 
     /// The BLE domain this session belongs to (VCSEC or INFOTAINMENT).
@@ -36,8 +35,6 @@ actor VehicleSession {
     /// Monotonically-increasing outbound counter. Incremented before each
     /// `sign` call and rolled back if sealing fails.
     private var counter: UInt32
-    /// Sliding replay window over inbound counters. Reset on `resync`.
-    private var window: CounterWindow
 
     /// Wall-clock moment the vehicle's current epoch (according to its
     /// monotonic clock) would have started, computed as
@@ -65,7 +62,6 @@ actor VehicleSession {
         self.sessionKey = sessionKey
         self.epoch = epoch
         counter = initialCounter
-        window = CounterWindow()
         sessionStart = handshakeDate.addingTimeInterval(-TimeInterval(clockTime))
     }
 
@@ -104,33 +100,29 @@ actor VehicleSession {
         }
     }
 
-    /// Inbound verify: extracts plaintext + counter, runs counter through the
-    /// replay window, returns plaintext on success.
+    /// Inbound verify: opens the AES-GCM response envelope and returns the
+    /// plaintext. No session-level replay window is maintained here because
+    /// the vehicle only guarantees counter monotonicity *per request ID*
+    /// (see `internal/authentication/verifier.go Encrypt` doc and
+    /// `internal/dispatcher/receiver.go antireplay`, which is a fresh
+    /// per-receiver window in Go). Duplicate responses are dropped earlier
+    /// by `Dispatcher.RequestTable`, which removes the token on the first
+    /// completion, so duplicates never reach `verify`.
     func verify(
         response: UniversalMessage_RoutableMessage,
         requestID: Data,
     ) throws -> Data {
-        let result: (counter: UInt32, plaintext: Data)
         do {
-            result = try InboundVerifier.openGCMResponse(
+            let result = try InboundVerifier.openGCMResponse(
                 message: response,
                 sessionKey: sessionKey,
                 verifierName: verifierName,
                 requestID: requestID,
             )
+            return result.plaintext
         } catch {
             throw Error.verifyFailed(String(describing: error))
         }
-
-        // Counter=0 responses bypass the replay window (see verifier.go
-        // verifySessionInfo — some responses intentionally allow out-of-order
-        // delivery). We treat 0 as "do not track".
-        if result.counter > 0 {
-            guard window.accept(result.counter) else {
-                throw Error.replayRejected
-            }
-        }
-        return result.plaintext
     }
 
     /// Resync this session to a freshly-received (and HMAC-verified)
@@ -145,7 +137,6 @@ actor VehicleSession {
     func resync(fromSessionInfo info: Signatures_SessionInfo, handshakeDate: Date = Date()) {
         epoch = info.epoch
         counter = info.counter
-        window = CounterWindow()
         sessionStart = handshakeDate.addingTimeInterval(-TimeInterval(info.clockTime))
     }
 

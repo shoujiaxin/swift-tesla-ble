@@ -271,7 +271,7 @@ final class SessionTests: XCTestCase {
         }
     }
 
-    func testVehicleSessionVerifyReplayIsRejected() async throws {
+    func testVehicleSessionVerifyAcceptsResponse() async throws {
         let session = makeTestSession()
 
         // Construct a signed request we'll later use as the "request" for
@@ -308,19 +308,14 @@ final class SessionTests: XCTestCase {
         response.subSigData = .signatureData(sigData)
         response.payload = .protobufMessageAsBytes(sealed.ciphertext)
 
-        // First verify succeeds.
-        let plaintext = try await session.verify(response: response, requestID: requestID)
-        XCTAssertEqual(plaintext, Data("OK".utf8))
-
-        // Second verify with the same counter must be rejected as replay.
-        do {
-            _ = try await session.verify(response: response, requestID: requestID)
-            XCTFail("expected replay rejection")
-        } catch VehicleSession.Error.replayRejected {
-            // ok
-        } catch {
-            XCTFail("wrong error: \(error)")
-        }
+        // Replay detection lives at the dispatcher layer (request-token
+        // routing, matching Go's per-receiver antireplay window), not here;
+        // `verify` must accept the same counter on repeat calls because the
+        // vehicle only guarantees monotonicity per request ID.
+        let first = try await session.verify(response: response, requestID: requestID)
+        XCTAssertEqual(first, Data("OK".utf8))
+        let second = try await session.verify(response: response, requestID: requestID)
+        XCTAssertEqual(second, Data("OK".utf8))
     }
 
     func testVehicleSessionResyncResetsState() async {

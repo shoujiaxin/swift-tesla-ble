@@ -111,6 +111,10 @@ actor Dispatcher {
         request.fromDestination = fromDst
         let requestUUID = Self.newUUIDBytes()
         request.uuid = requestUUID
+        // Match Go's DefaultFlags (vehicle.go:22). 2024.38+ firmware
+        // rejects getVehicleData with MESSAGEFAULT_ERROR_REQUIRES_RESPONSE_ENCRYPTION
+        // unless FLAG_ENCRYPT_RESPONSE is set.
+        request.flags = Self.defaultOutboundFlags
 
         // Sign (actor hop into VehicleSession).
         try await session.sign(plaintext: plaintext, into: &request, expiresIn: Self.defaultExpiresIn)
@@ -571,6 +575,12 @@ actor Dispatcher {
     /// The absolute `expiresAt` on the wire is computed by `VehicleSession`
     /// relative to `sessionStart`, not written as a raw constant here.
     private static let defaultExpiresIn: TimeInterval = 5
+
+    /// Default flag mask applied to every signed outbound request. Mirrors
+    /// `pkg/vehicle/vehicle.go DefaultFlags = 1 << FLAG_ENCRYPT_RESPONSE`.
+    /// Required by 2024.38+ firmware for `getVehicleData`; older firmware
+    /// ignores it.
+    private static let defaultOutboundFlags: UInt32 = 1 << UInt32(UniversalMessage_Flags.flagEncryptResponse.rawValue)
 
     private static func newUUIDBytes() -> Data {
         var uuid = UUID().uuid
