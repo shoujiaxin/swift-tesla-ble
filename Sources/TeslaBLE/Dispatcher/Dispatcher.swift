@@ -25,7 +25,6 @@ import Security
 ///
 /// This asymmetry is what the protocol actually needs — single-flight
 /// per VCSEC domain, multi-flight per Infotainment with uuid disambiguation.
-@available(macOS 13.0, iOS 16.0, *)
 actor Dispatcher {
     enum Error: Swift.Error, Equatable {
         case notStarted

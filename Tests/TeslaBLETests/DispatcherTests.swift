@@ -124,12 +124,10 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Dispatcher helpers
 
-    @available(macOS 13.0, iOS 16.0, *)
     private func makeSessionKey() -> SessionKey {
         SessionKey(rawBytes: Data(repeating: 0x42, count: 16))
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     private func makeSession(domain: UniversalMessage_Domain, initialCounter: UInt32 = 0) -> VehicleSession {
         VehicleSession(
             domain: domain,
@@ -144,7 +142,6 @@ final class DispatcherTests: XCTestCase {
     /// Seal a canned response plaintext with the supplied session parameters
     /// and return the serialized `UniversalMessage_RoutableMessage` bytes
     /// ready to hand back through `FakeTransport.enqueueInbound`.
-    @available(macOS 13.0, iOS 16.0, *)
     private func makeResponseBytes(
         respondingTo request: UniversalMessage_RoutableMessage,
         plaintext: Data,
@@ -197,7 +194,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Dispatcher happy path
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSendAndReceivesResponse() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -240,7 +236,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSendUnsignedNoReplyReturnsAfterTransmit() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -269,7 +264,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Dispatcher timeout
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSendTimesOut() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -292,7 +286,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Dispatcher error paths
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherRejectsSendWithoutSession() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -308,7 +301,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherDropsInboundWithUnknownRequestUUID() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -358,7 +350,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Dispatcher stop() wakes in-flight sends
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherStopFailsInFlightSends() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -390,7 +381,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Dispatcher handshake roundtrip
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherNegotiateRoundtrip() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -502,7 +492,6 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(message.toDestination.domain, .vehicleSecurity)
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSendUnsignedNoReplySetsRoutingAddress() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -530,7 +519,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - sendUnsigned (reply variant)
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSendUnsignedRoundtrip() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -567,7 +555,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSendUnsignedRejectsResponseWithoutPayload() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -609,7 +596,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Negotiate error paths
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherNegotiateRejectsResponseMissingSessionInfo() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -643,7 +629,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherNegotiateRejectsResponseMissingSignatureData() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -680,7 +665,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherNegotiateRejectsWrongSignatureType() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -723,7 +707,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherNegotiateRejectsHMACTagMismatch() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -770,7 +753,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherNegotiateRejectsMalformedVehiclePublicKey() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -816,7 +798,6 @@ final class DispatcherTests: XCTestCase {
 
     // MARK: - Session routing
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherRequireSessionRejectsUnsupportedDomain() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -832,7 +813,6 @@ final class DispatcherTests: XCTestCase {
         await dispatcher.stop()
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherInstallsInfotainmentSessionIndependently() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -857,7 +837,6 @@ final class DispatcherTests: XCTestCase {
     /// messages: `fromDestination.domain` tells the inbound loop which
     /// routing scheme to use; `toDestination.routingAddress` echoes the
     /// client's request address so VCSEC responses match by address.
-    @available(macOS 13.0, iOS 16.0, *)
     private func stampRouting(
         on response: inout UniversalMessage_RoutableMessage,
         respondingTo request: UniversalMessage_RoutableMessage,
@@ -873,7 +852,6 @@ final class DispatcherTests: XCTestCase {
         }
     }
 
-    @available(macOS 13.0, iOS 16.0, *)
     private func waitForFirstOutbound(_ transport: FakeTransport) async throws -> Data {
         for _ in 0 ..< 100 {
             let sent = await transport.sentMessages
@@ -890,7 +868,6 @@ final class DispatcherTests: XCTestCase {
     /// with no `signatureData`. The dispatcher must surface the fault name
     /// instead of falling through to the verifier's opaque
     /// `missingSignatureData`. Mirrors `protocol.GetError` in Go.
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSurfacesSignedMessageFaultBeforeVerify() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -925,7 +902,6 @@ final class DispatcherTests: XCTestCase {
     }
 
     /// `operationStatus == .rror` without a fault code also must be surfaced.
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherSurfacesOperationStatusError() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -965,7 +941,6 @@ final class DispatcherTests: XCTestCase {
     /// requestUuid for VCSEC command responses, so Swift must route on the
     /// per-message random address instead — mirrors Go's `dispatcher.go:259`
     /// skip-UUID-for-VCSEC behavior.
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherRoutesVCSECByAddressWithEmptyRequestUuid() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -1003,7 +978,6 @@ final class DispatcherTests: XCTestCase {
 
     /// Two concurrent Infotainment sends get disambiguated by `requestUuid`,
     /// not by routing address (which is stable for the domain).
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherInfotainmentUsesStableAddressAndUUIDMatching() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -1039,7 +1013,6 @@ final class DispatcherTests: XCTestCase {
     /// and resync the installed session before completing the waiter. The
     /// waiter then observes the error and the NEXT send will use the new
     /// epoch/counter/sessionStart.
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherResyncsSessionFromInboundSessionInfo() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)
@@ -1108,7 +1081,6 @@ final class DispatcherTests: XCTestCase {
 
     /// Two successive sends must use independent random routing addresses —
     /// matches the reference app's per-message randomization.
-    @available(macOS 13.0, iOS 16.0, *)
     func testDispatcherRoutingAddressVariesPerMessage() async throws {
         let transport = FakeTransport()
         let dispatcher = Dispatcher(transport: transport)

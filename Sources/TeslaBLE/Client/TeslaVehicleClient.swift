@@ -12,7 +12,6 @@ import Foundation
 /// The type is an `actor`, so all calls are serialized and safe to invoke
 /// from any task. Use one client per VIN; discard and recreate to target a
 /// different vehicle.
-@available(macOS 13.0, iOS 16.0, *)
 public actor TeslaVehicleClient {
     // MARK: - Stored
 
